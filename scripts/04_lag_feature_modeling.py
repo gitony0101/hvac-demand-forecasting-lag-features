@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pandas as pd
 from sklearn.ensemble import AdaBoostRegressor, RandomForestRegressor
 from sklearn.tree import DecisionTreeRegressor
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 from src.utils import (
     TARGET_COL,
@@ -13,12 +18,10 @@ from src.utils import (
     add_shifted_rolling_features,
     evaluate_holdout,
     select_correlated_features,
-    split_dataframe_chronologically,
-    time_series_cv_summary,
+    time_series_cv_summary_with_train_only_feature_selection,
 )
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 FEATURE_PATH = DATA_DIR / "df_daily_feature_creation.csv"
 LAG_PATH = DATA_DIR / "df_daily_feature_lags.csv"
@@ -44,21 +47,30 @@ def build_lag_dataset(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main() -> None:
+    if not FEATURE_PATH.exists():
+        raise FileNotFoundError(f"Missing input file: {FEATURE_PATH}")
+
     df = pd.read_csv(FEATURE_PATH)
     df[TIME_COL] = pd.to_datetime(df[TIME_COL])
 
     lag_df = build_lag_dataset(df)
     lag_df.to_csv(LAG_PATH, index=False)
 
+    # Fit feature selection only on historical training split to avoid holdout leakage.
+    model_df = lag_df.sort_values(TIME_COL).dropna().copy()
+    train_df = model_df[model_df[TIME_COL] <= pd.Timestamp(SPLIT_TIME)].copy()
+    test_df = model_df[model_df[TIME_COL] > pd.Timestamp(SPLIT_TIME)].copy()
     selected = select_correlated_features(
-        lag_df.drop(columns=[TIME_COL]), threshold=0.3
+        train_df.drop(columns=[TIME_COL]), threshold=0.3
     )
-    model_df = lag_df[[TIME_COL, TARGET_COL] + selected].dropna().copy()
+    if not selected:
+        raise ValueError("No features selected from training split at threshold=0.3.")
 
-    X_train, X_test, y_train, y_test = split_dataframe_chronologically(
-        model_df, split_time=SPLIT_TIME, target_col=TARGET_COL
-    )
-    test_times = model_df.loc[model_df[TIME_COL] > SPLIT_TIME, TIME_COL]
+    X_train = train_df[selected]
+    y_train = train_df[TARGET_COL]
+    X_test = test_df[selected]
+    y_test = test_df[TARGET_COL]
+    test_times = test_df[TIME_COL]
 
     models = {
         "decision_tree": DecisionTreeRegressor(max_depth=8, random_state=42),
@@ -75,9 +87,6 @@ def main() -> None:
     holdout_rows = []
     cv_rows = []
 
-    X_cv = model_df.drop(columns=[TIME_COL, TARGET_COL])
-    y_cv = model_df[TARGET_COL]
-
     for name, model in models.items():
         holdout = evaluate_holdout(model, X_train, y_train, X_test, y_test, test_times)
         holdout_rows.append(
@@ -93,7 +102,14 @@ def main() -> None:
             DATA_DIR / f"lag_model_predictions_{name}.csv", index=False
         )
 
-        cv = time_series_cv_summary(model, X_cv, y_cv, n_splits=5)
+        cv = time_series_cv_summary_with_train_only_feature_selection(
+            model,
+            model_df,
+            target_col=TARGET_COL,
+            threshold=0.3,
+            n_splits=5,
+            time_col=TIME_COL,
+        )
         cv_rows.append(
             {
                 "model": name,

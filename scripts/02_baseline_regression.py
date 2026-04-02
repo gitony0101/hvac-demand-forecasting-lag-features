@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pandas as pd
 from sklearn.ensemble import AdaBoostRegressor, RandomForestRegressor
 from sklearn.tree import DecisionTreeRegressor
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 from src.utils import (
     TARGET_COL,
@@ -14,7 +19,6 @@ from src.utils import (
 )
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 RESULTS_DIR = BASE_DIR / "figures"
 DAILY_PATH = DATA_DIR / "df_daily.csv"
@@ -22,6 +26,9 @@ SPLIT_TIME = "2018-06-01"
 
 
 def main() -> None:
+    if not DAILY_PATH.exists():
+        raise FileNotFoundError(f"Missing input file: {DAILY_PATH}")
+
     df = pd.read_csv(DAILY_PATH)
     df[TIME_COL] = pd.to_datetime(df[TIME_COL])
     df = df.dropna().sort_values(TIME_COL)
