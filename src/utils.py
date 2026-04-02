@@ -108,7 +108,10 @@ def preprocess_raw_data(df: pd.DataFrame) -> pd.DataFrame:
 def aggregate_to_daily(df: pd.DataFrame) -> pd.DataFrame:
     temp = df.copy().set_index(TIME_COL)
 
-    daily = pd.DataFrame(index=temp.resample("D").mean().index)
+    # NOTE: build the daily index from the target resample directly.
+    # Using temp.resample("D").mean() can fail when object columns are present.
+    daily_index = temp[TARGET_COL].resample("D").sum().index
+    daily = pd.DataFrame(index=daily_index)
     daily[TARGET_COL] = temp[TARGET_COL].resample("D").sum()
 
     if "heat_demand_values" in temp.columns:
@@ -308,6 +311,71 @@ def time_series_cv_summary(
                 "mape": float(mape(y_test, pred)),
                 "r2": float(r2_score(y_test, pred)),
             }
+        )
+
+    details = pd.DataFrame(rows)
+    return CVSummary(
+        avg_rmse=float(details["rmse"].mean()),
+        avg_mae=float(details["mae"].mean()),
+        avg_mape=float(details["mape"].mean()),
+        avg_r2=float(details["r2"].mean()),
+        detailed_results=details,
+    )
+
+
+def time_series_cv_summary_with_train_only_feature_selection(
+    model,
+    df: pd.DataFrame,
+    target_col: str = TARGET_COL,
+    threshold: float = 0.3,
+    n_splits: int = 5,
+    time_col: str = TIME_COL,
+) -> CVSummary:
+    """
+    Time-series CV with correlation feature selection fit on each training fold only.
+    This prevents validation-fold leakage during feature selection.
+    """
+    data = df.copy()
+    if time_col in data.columns:
+        data[time_col] = pd.to_datetime(data[time_col])
+        data = data.sort_values(time_col).reset_index(drop=True)
+
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    rows = []
+
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(data), start=1):
+        train_df = data.iloc[train_idx].copy()
+        test_df = data.iloc[test_idx].copy()
+
+        selected = select_correlated_features(
+            train_df.drop(columns=[c for c in [time_col] if c in train_df.columns]),
+            target_col=target_col,
+            threshold=threshold,
+        )
+        if not selected:
+            continue
+
+        estimator = clone(model)
+        X_train = train_df[selected]
+        y_train = train_df[target_col]
+        X_test = test_df[selected]
+        y_test = test_df[target_col]
+        estimator.fit(X_train, y_train)
+        pred = estimator.predict(X_test)
+        rows.append(
+            {
+                "fold": fold,
+                "n_features": len(selected),
+                "rmse": float(np.sqrt(mean_squared_error(y_test, pred))),
+                "mae": float(mean_absolute_error(y_test, pred)),
+                "mape": float(mape(y_test, pred)),
+                "r2": float(r2_score(y_test, pred)),
+            }
+        )
+
+    if not rows:
+        raise ValueError(
+            "No features passed the correlation threshold in any training fold."
         )
 
     details = pd.DataFrame(rows)
